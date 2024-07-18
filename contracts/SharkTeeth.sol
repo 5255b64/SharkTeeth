@@ -129,58 +129,74 @@ contract SharkGold is IERC20 {
 }
 
 contract SharkTeeth {
-    uint256 public bonus; // 游戏奖励
-    uint256 public fee; // 用户成本 每次touch后提升（翻倍）
-    uint8 public teeth_total; // 当局游戏的touch次数上线
-    uint8 public teeth_touched; // 当局游戏已touch次数
-    bool public is_start = false; // 当局游戏是否开始
-    bool public is_finish = false; // 当局游戏是否结束
-    address public gold_addr;
     address public owner;
+    address public gold_addr;
+    struct Shark {
+        uint256 bonus; // 游戏奖励
+        uint256 fee; // 用户成本 每次touch后提升（翻倍）
+        uint8 teeth_total; // 当局游戏的touch次数上线
+        uint8 teeth_touched; // 当局游戏已touch次数
+        bool is_finish; // 当局游戏是否结束
+        address owner; // game creator
+        uint256 gold; // 当局游戏持有的gold总数
+    }
 
-    event GameStart();
-    event GameStop();
-    event TouchSuccess(address user, uint256 fee, uint256 bonus);
-    event TouchFail(address user, uint256 fee);
-    event FeeIncreased(uint256 old_fee, uint256 new_fee);
+    Shark[] public sharks;
 
-    constructor(uint256 bonus_, uint256 fee_, uint8 teeth_total_, address gold_addr_) payable {
-        require(teeth_total_ > 0);
-        bonus = bonus_;
-        fee = fee_;
-        teeth_total = teeth_total_;
-        teeth_touched = 0;
+    event GameStart(uint256 shark_id);
+    event GameStop(uint256 shark_id);
+    event TouchSuccess(uint256 shark_id, address user, uint256 fee, uint256 bonus);
+    event TouchFail(uint256 shark_id, address user, uint256 fee);
+    event FeeIncreased(uint256 shark_id, uint256 old_fee, uint256 new_fee);
+
+    constructor(address gold_addr_) {
         gold_addr = gold_addr_;
         owner = msg.sender;
     }
 
-    modifier notFinish {
-        require(is_finish == false);
+    modifier notFinish(uint256 shark_id) {
+        require(sharks[shark_id].is_finish == false);
         _; // 如果是的话，继续运行函数主体；否则报错并revert交易
     }
 
-    modifier checkGold(address addr, uint256 fee_) {
-        require(IERC20(gold_addr).allowance(addr, address(this)) >= fee_);
+    modifier checkGold(uint256 shark_id) {
+        require(IERC20(gold_addr).allowance(msg.sender, address(this)) >= sharks[shark_id].fee);
         _; // 如果是的话，继续运行函数主体；否则报错并revert交易
     }
 
-    modifier onlyOwner {
-        require(msg.sender == owner);
+    modifier onlyOwner(uint256 shark_id) {
+        require(msg.sender == sharks[shark_id].owner);
         _; // 如果是的话，继续运行函数主体；否则报错并revert交易
     }
 
-    function start() public onlyOwner {
-        require(is_start == false);
-        uint256 balance = IERC20(gold_addr).balanceOf(address(this));
-        require(balance >= (teeth_total - 1) * bonus);
-        is_start = true;
-        emit GameStart();
+    modifier finished(uint256 shark_id) {
+        require(sharks[shark_id].is_finish == true);
+        _; // 如果是的话，继续运行函数主体；否则报错并revert交易
     }
 
-    function withdraw() public onlyOwner {
-        require(is_finish == true);
-        uint256 balance = IERC20(gold_addr).balanceOf(address(this));
-        IERC20(gold_addr).transfer(owner, balance);
+    modifier notFinished(uint256 shark_id) {
+        require(sharks[shark_id].is_finish == false);
+        _; // 如果是的话，继续运行函数主体；否则报错并revert交易
+    }
+
+    /**
+     * @dev 返回shark_id
+     */
+    function new_game(uint256 bonus_, uint256 fee_, uint8 teeth_total_) public returns(uint256) {
+        require(teeth_total_ > 0);
+        uint256 gold = (teeth_total_ - 1) * bonus_;
+        require(IERC20(gold_addr).allowance(msg.sender, address(this)) >= gold);
+        IERC20(gold_addr).transferFrom(msg.sender, address(this), gold);
+        Shark memory shark = Shark(bonus_, fee_, teeth_total_, 0, false, msg.sender, gold);
+        uint256 shark_id = sharks.length;
+        sharks.push(shark);
+        emit GameStart(shark_id);
+        return(shark_id);
+    }
+
+    function withdraw(uint256 shark_id) public onlyOwner(shark_id) finished(shark_id) {
+        IERC20(gold_addr).transfer(msg.sender, sharks[shark_id].gold);
+        sharks[shark_id].gold = 0;
     }
 
     function getRandomOnchain() internal view returns(uint256){
@@ -190,29 +206,42 @@ contract SharkTeeth {
         return uint256(randomBytes);
     }
 
-    function increaseFee() internal {
-        uint256 old_fee = fee;
-        fee = fee * 2;
-        emit FeeIncreased(old_fee, fee);
+    /**
+     * @dev 提升fee
+     */
+    function increaseFee(uint256 shark_id) internal {
+        uint256 old_fee = sharks[shark_id].fee;
+        sharks[shark_id].fee = sharks[shark_id].fee * 2;
+        emit FeeIncreased(shark_id, old_fee, sharks[shark_id].fee);
     }
 
-    event TestRandom(uint256 random_number);
-
-    function touch() public checkGold(msg.sender, fee){
-        require(is_start == true);
-        require(is_finish == false);
-        uint256 random_number = getRandomOnchain() % (teeth_total - teeth_touched);
-        emit TestRandom(random_number);
+    function touch(uint256 shark_id) public notFinished(shark_id) checkGold(shark_id){
+        uint256 random_number = getRandomOnchain() % (sharks[shark_id].teeth_total - sharks[shark_id].teeth_touched);
         if (random_number != 0) {
-            IERC20(gold_addr).transfer(msg.sender, bonus);
-            emit TouchSuccess(msg.sender, fee, bonus);
-            increaseFee();
+            IERC20(gold_addr).transfer(msg.sender, sharks[shark_id].bonus);
+            sharks[shark_id].gold = sharks[shark_id].gold - sharks[shark_id].bonus;
+            emit TouchSuccess(shark_id, msg.sender, sharks[shark_id].fee, sharks[shark_id].bonus);
+            increaseFee(shark_id);
         } else {
-            IERC20(gold_addr).transferFrom(msg.sender, address(this), fee);
-            is_finish = true;
-            emit TouchFail(msg.sender, fee);
-            emit GameStop();
+            IERC20(gold_addr).transferFrom(msg.sender, address(this), sharks[shark_id].fee);
+            sharks[shark_id].gold = sharks[shark_id].gold + sharks[shark_id].fee;
+            sharks[shark_id].is_finish = true;
+            emit TouchFail(shark_id, msg.sender, sharks[shark_id].fee);
+            emit GameStop(shark_id);
         }
-        teeth_touched += 1;
+        sharks[shark_id].teeth_touched += 1;
+    }
+
+    function get_sharks_num() public view returns(uint256) {
+        return sharks.length;
+    }
+
+    function get_shark(uint256 id) public view returns(Shark memory) {
+        require(id < sharks.length);
+        return sharks[id];
+    }
+
+    function get_sharks() public view returns(Shark[] memory) {
+        return sharks;
     }
 }
